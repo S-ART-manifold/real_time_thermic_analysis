@@ -1,0 +1,26 @@
+# Documentación confidencial y propuestas de diseño
+*.pdf
+Design-Booster-3_Satellite_Proposal_S-ART.pdf
+
+# Archivos de caché y compilación de Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.spec
+
+# Archivos de entorno y configuración local
+.env
+.venv/
+venv/
+ENV/
+env/
+
+# Logs y telemetría exportada
+telemetry_log.csv
+*.log
+
+# Archivos temporales del sistema y del editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
