@@ -17,13 +17,105 @@ from stl import mesh as stl_mesh
 pg.setConfigOption('background', '#161b22')
 pg.setConfigOption('foreground', '#c9d1d9')
 
-# Constantes físicas del Aluminio 6061-T6 y del entorno espacial
-K_AL = 0.167       # Conductividad térmica: W / (mm * K)
-ALPHA_AL = 69.0    # Difusividad térmica: mm^2 / s
-R_MIN = 20.0       # Radio mínimo efectivo del nodo (mm)
-SIGMA_SB = 5.67037e-8 # Constante de Stefan-Boltzmann: W / (m^2 * K^4)
-TOTAL_RAD_AREA = 0.38 # Área superficial radiativa total del 3U + paneles (m^2)
-EPSILON_AVG = 0.85    # Emisividad infrarroja media ponderada
+# ==================== CONSTANTES FÍSICAS — AL6061-T6 Y ENTORNO ESPACIAL ====================
+# Propiedades del Aluminio 6061-T6 (ASM International, Matweb)
+K_AL   = 0.167      # Conductividad térmica estructural:    W / (mm·K)
+CP_AL  = 897.0      # Calor específico:                     J / (kg·K)
+RHO_AL = 2.70e-9    # Densidad Al6061: 2700 kg/m³ = 2.70e-9 kg/mm³
+
+# Constantes orbitales y radiativas
+SIGMA_SB     = 5.67037e-8  # Constante de Stefan-Boltzmann:   W / (m²·K⁴)
+G_SOLAR      = 1361.0      # Constante solar (SORCE/TIM):      W / m²
+ALBEDO_EARTH = 0.30        # Albedo terrestre medio:           adim. (CERES)
+Q_EARTH_IR   = 237.0       # Emisión IR de la Tierra (LEO):    W / m²
+
+# ── Propiedades ópticas de superficies ──────────────────────────────────────
+# Paneles solares (cara irradiada: GaAs, back sheet Kapton)
+ALPHA_SOLAR_PANEL = 0.90   # Absortividad solar
+EPS_PANEL         = 0.85   # Emisividad IR back-sheet Kapton
+# Cara +Z (aluminio anodizado negro)
+ALPHA_SOLAR_TOP   = 0.92
+EPS_TOP           = 0.88
+# Laterales del chasis (aluminio sin tratar)
+EPS_CHASSIS       = 0.12
+# Cara -Z (nadir)
+EPS_BOT           = 0.85
+
+# ── Geometría de superficies radiativas (m²) ────────────────────────────────
+# Cuerpo 3U estándar 100×100×340 mm + 4 paneles desplegables 30×10 cm
+A_PANEL_ONE    = 0.030                    # Un panel solar (cara irradiada)
+A_PANELS_TOTAL = 4 * A_PANEL_ONE          # 4 paneles: 0.120 m²
+A_TOP          = 0.100 * 0.100            # Cara +Z:   0.010 m²
+A_LATERAL      = 4 * (0.100 * 0.340)     # 4 laterales del chasis: 0.136 m²
+A_BOT          = 0.100 * 0.100            # Cara -Z:   0.010 m²
+# Área total irradiante (suma documentada por superficie)
+TOTAL_RAD_AREA = A_PANELS_TOTAL + A_TOP + A_LATERAL + A_BOT   # ≈ 0.276 m²
+
+# Emisividad efectiva ponderada por área (para cálculo de T_eq)
+EPSILON_EFF = (EPS_PANEL   * A_PANELS_TOTAL +
+               EPS_TOP     * A_TOP +
+               EPS_CHASSIS * A_LATERAL +
+               EPS_BOT     * A_BOT) / TOTAL_RAD_AREA
+
+# ── Red nodal: masas y capacidades térmicas ──────────────────────────────────
+# Masa calculada como RHO_AL × volumen estructural Al + masa de PCBs/harness
+# Grosor de pared de chasis CubeSat estándar: 1.5 mm
+# Las caras +Z/-Z tienen masa estructural despreciable comparada con la conductancia
+# hacia el nodo de chasis adyacente (nodo rígido). Siguiendo práctica ECSS de
+# modelos concentrados, su masa se incluye en el nodo de chasis adyacente y se
+# mantienen como variables de estado separadas para los flujos radiativos.
+
+# Cara +Z: incluida en C_UPPER para estabilidad numérica (Euler explícito)
+M_TOP_FACE   = RHO_AL * (100.0 * 100.0 * 1.5)              # kg  ~0.0001
+# Cara -Z: incluida en C_LOWER
+M_BOT_FACE   = RHO_AL * (100.0 * 100.0 * 1.5)              # kg  ~0.0001
+
+# Paneles: 4 paneles de 1 mm Al + células GaAs y substrato (~100 g)
+M_PANEL  = RHO_AL * (4 * 300.0 * 100.0 * 1.0) + 0.10      # kg  ~0.100
+
+# Chasis: paredes de 1.5 mm + PCBs/harness estimados
+M_UPPER  = RHO_AL * 4 * (90.0 * 100.0 * 1.5) + M_TOP_FACE + 0.280  # kg ~0.280
+M_MID    = RHO_AL * 4 * (80.0 * 100.0 * 1.5) + 0.300               # kg ~0.300
+M_LOWER  = RHO_AL * 4 * (90.0 * 100.0 * 1.5) + M_BOT_FACE + 0.460  # kg ~0.460
+
+# M_TOP y M_BOT: solo la "resistencia" como nodo de frontera (masa ≈ 0 pura estructura)
+# → capacidad mínima para mantener la variable de estado sin rigidez numérica extrema
+# Asignamos 1 g de masa efectiva (interfaz + soldaduras + capa de superficie)
+M_TOP    = 0.001   # kg — nodo frontera +Z (1 g efectivo)
+M_BOT    = 0.001   # kg — nodo frontera -Z (1 g efectivo)
+
+C_PANEL  = M_PANEL  * CP_AL   # J/K  ≈   90
+C_TOP    = M_TOP    * CP_AL   # J/K  ≈  0.9
+C_UPPER  = M_UPPER  * CP_AL   # J/K  ≈  251
+C_MID    = M_MID    * CP_AL   # J/K  ≈  269
+C_LOWER  = M_LOWER  * CP_AL   # J/K  ≈  413
+C_BOT    = M_BOT    * CP_AL   # J/K  ≈  0.9
+
+# ── Conductancias nodales: G = K_AL × A_sección / L_nodo  [W/K] ─────────────
+# Grosor de pared 1.5 mm, longitudes de nodo según geometría 3U
+# Bisagra panel→cara+Z: sección efectiva 4×(5×1.5) mm², factor TIM 0.5, L=15 mm
+G_PANEL_TOP  = 0.5 * K_AL * (4 * 5.0 * 1.5) / 15.0         # ≈ 0.167 W/K
+# Cara+Z→chasis superior: 4 paredes de 100×1.5 mm², L=45 mm
+G_TOP_UPPER  = K_AL * (4 * 100.0 * 1.5) / 45.0              # ≈ 2.23  W/K
+# Chasis superior→medio: L=80 mm
+G_UPPER_MID  = K_AL * (4 * 100.0 * 1.5) / 80.0              # ≈ 1.25  W/K
+# Chasis medio→inferior: L=80 mm
+G_MID_LOWER  = K_AL * (4 * 100.0 * 1.5) / 80.0              # ≈ 1.25  W/K
+# Chasis inferior→cara-Z: L=45 mm
+G_LOWER_BOT  = K_AL * (4 * 100.0 * 1.5) / 45.0              # ≈ 2.23  W/K
+
+# Criterio de estabilidad Euler explícito: dt_max = 0.4 × C_min / G_max
+# El nodo más rígido es T_top (1 g efectivo, G=2.23 W/K → dt_max ≈ 0.16 s)
+DT_MAX_EULER = 0.40 * C_TOP / G_TOP_UPPER                    # ≈ 0.16 s
+
+# Factor de vista efectivo panel→Tierra (LEO 440 km, panel superior)
+F_VIEW_PANEL_EARTH = 0.15  # Componente efectiva del factor de vista orbital
+
+# Resistencia térmica de interfaz componente→estructura (TIM + tornillos)
+# Rango típico para PCBs roscados en Al: 3–8 K/W (ECSS-E-HB-31-01)
+# ADVERTENCIA: estimación — requiere calibración experimental (TVAC)
+R_TH_LOCAL = 5.5   # K/W
+L_COND_MM  = 40.0  # mm — longitud característica de conducción local
 
 # ==================== SHADER DE ILUMINACIÓN SOLAR DESDE +Z ====================
 vs_solar = gl.shaders.VertexShader("""
@@ -870,134 +962,181 @@ class SimulatorApp(QMainWindow):
                 f.write(f"{t.id},{t.name},{t.subsystem},{t.temp:.2f}\n")
         print(f"Telemetría exportada a {path}")
 
-    # ==================== FÍSICA TÉRMICA RIGUROSA EN LEO ====================
+    # ==================== FÍSICA TÉRMICA — RED NODAL TRAZABLE EN LEO ====================
     def update_physics(self):
-        """ Simulación física diferencial continua y rigurosa en LEO (20 Hz) """
+        """
+        Simulación física diferencial continua en LEO a 20 Hz.
+
+        MODELO: red de 6 nodos concentrados. Las conductancias son trazables a la
+        geometría y conductividad de Al6061-T6. Las capacidades térmicas derivan de
+        la masa de cada sección estructural (ver constantes en la cabecera del módulo).
+
+        ADVERTENCIA sobre las temperaturas de termistores:
+          La temperatura base se interpola exactamente de la red nodal.
+          La elevación local por fuentes (ΔT = P·R_th·exp(-d/L_c)) es una
+          ESTIMACIÓN CALIBRADA, no una solución FEM. Requiere verificación TVAC.
+        """
         if self.is_paused: return
-        dt = 0.05 * self.sim_speed
+
+        # dt efectivo limitado por criterio de Euler explícito para evitar
+        # divergencia numérica a altas velocidades de simulación
+        dt_raw = 0.05 * self.sim_speed
+        dt = min(dt_raw, DT_MAX_EULER)
         self.sim_time += dt
 
-        # 1. Geometría Orbital Kepleriana (440 km LEO, Periodo ~93.3 min)
-        r = 6371.0 + self.altitude_km
-        period = 2.0 * np.pi * np.sqrt((r * 1000.0)**3 / 3.986e14)
-        phase = (self.sim_time % period) / period
-        theta = np.arcsin(6371.0 / r)
-        eclipse_fraction = theta / np.pi
+        # ── 1. Geometría orbital kepleriana ──────────────────────────────────
+        r_km  = 6371.0 + self.altitude_km
+        period = 2.0 * np.pi * np.sqrt((r_km * 1000.0)**3 / 3.986e14)  # s
+        phase  = (self.sim_time % period) / period
+        # Fracción de eclipse (geometría esférica)
+        theta_ecl   = np.arcsin(6371.0 / r_km)
+        eclipse_frac = theta_ecl / np.pi
 
         if self.eclipse_mode == "FORCE_SUN":
-            target_sun = 1.0
-            self.in_eclipse = False
+            target_sun = 1.0; self.in_eclipse = False
         elif self.eclipse_mode == "FORCE_ECLIPSE":
-            target_sun = 0.0
-            self.in_eclipse = True
+            target_sun = 0.0; self.in_eclipse = True
         else:
-            in_shadow = (phase > (1.0 - eclipse_fraction / 2.0)) or (phase < (eclipse_fraction / 2.0))
+            in_shadow = (phase > (1.0 - eclipse_frac / 2.0)) or (phase < (eclipse_frac / 2.0))
             self.in_eclipse = in_shadow
             target_sun = 0.0 if in_shadow else 1.0
 
-        # Transición orbital realista al cruzar el terminador solar (~18s)
+        # Transición gradual en el terminador (~18 s de penumbra)
         self.sun_intensity += (target_sun - self.sun_intensity) * min(1.0, dt / 18.0)
+        si = self.sun_intensity   # abreviatura
 
-        # Actualizar indicador solar
-        if self.sun_intensity > 0.5:
-            self.orbit_badge.setText(f"SOL ({int(1361*self.sun_intensity)} W/m²)")
+        if si > 0.5:
+            self.orbit_badge.setText(f"SOL ({int(G_SOLAR*si)} W/m²)")
             self.orbit_badge.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 2px 8px; border-radius: 3px; font-size: 11px;")
         else:
             self.orbit_badge.setText("ECLIPSE (Sombra LEO)")
             self.orbit_badge.setStyleSheet("background-color: #388bfd; color: white; font-weight: bold; padding: 2px 8px; border-radius: 3px; font-size: 11px;")
 
-        # RADIACIÓN Y FLUJOS TÉRMICOS:
-        q_earth_ir_flux = 237.0 # Emisión infrarroja continua de la Tierra (W/m2)
-        
-        # 1. PANELES SOLARES
-        q_solar_panels = self.sun_intensity * 1361.0 * 0.12 * 0.90 * (1.0 - 0.28) # ~105.8 W en sol
-        q_earth_ir_panels = 0.85 * 0.12 * q_earth_ir_flux * 0.15 # ~3.6 W
+        # ── 2. PANELES SOLARES ───────────────────────────────────────────────
+        # Irradiancia solar directa absorbida (solo cara GaAs orientada al sol)
+        q_solar_direct = si * G_SOLAR * A_PANELS_TOTAL * ALPHA_SOLAR_PANEL        # ~147 W en sol
+
+        # Albedo terrestre: contribución ADICIONAL desde nadir (no reduce la directa)
+        # Q_albedo = G_solar × albedo_T × F_vista_panel_Tierra × A_panel × α_solar
+        q_albedo_panels = si * G_SOLAR * ALBEDO_EARTH * F_VIEW_PANEL_EARTH \
+                         * A_PANELS_TOTAL * ALPHA_SOLAR_PANEL                      # ~5.9 W en sol
+
+        # Emisión IR de la Tierra absorbida por los paneles (continua, ≠ albedo)
+        q_earth_ir_panels = EPS_PANEL * Q_EARTH_IR * A_PANELS_TOTAL * F_VIEW_PANEL_EARTH  # ~4.3 W
+
+        # Emisión IR al espacio por los paneles (ambas caras)
         t_pan_k = self.T_panels_tip + 273.15
-        q_rad_panels = 0.85 * SIGMA_SB * 0.24 * (t_pan_k**4)
-        q_cond_panels_to_top = 0.8 * (self.T_top - self.T_panels_tip)
-        dT_panels = (q_solar_panels + q_earth_ir_panels + q_cond_panels_to_top - q_rad_panels) * dt / 716.8
+        q_rad_panels = EPS_PANEL * SIGMA_SB * (2 * A_PANELS_TOTAL) * t_pan_k**4  # ambas caras
+
+        # Conducción bisagra panel→cara+Z (G trazable a K_AL)
+        q_cond_pan_top = G_PANEL_TOP * (self.T_panels_tip - self.T_top)
+
+        dT_panels = (q_solar_direct + q_albedo_panels + q_earth_ir_panels
+                     - q_rad_panels - q_cond_pan_top) * dt / C_PANEL
         self.T_panels_tip += dT_panels
 
-        # 2. CARA SUPERIOR (+Z)
-        q_solar_top = self.sun_intensity * 1361.0 * 0.01 * 0.80 # ~10.9 W
-        t_top_k = self.T_top + 273.15
-        q_rad_top = 0.80 * SIGMA_SB * 0.01 * (t_top_k**4)
-        q_cond_top_to_upper = 1.6 * (self.T_upper - self.T_top)
-        dT_top = (q_solar_top - q_rad_top - q_cond_panels_to_top + q_cond_top_to_upper) * dt / 360.0
+        # ── 3. CARA SUPERIOR (+Z) ────────────────────────────────────────────
+        # Cara apuntando al sol: absorbe irradiancia solar directa
+        q_solar_top = si * G_SOLAR * A_TOP * ALPHA_SOLAR_TOP                     # ~12.5 W en sol
+        t_top_k     = self.T_top + 273.15
+        q_rad_top   = EPS_TOP * SIGMA_SB * A_TOP * t_top_k**4
+
+        # Conducción cara+Z → chasis superior
+        q_cond_top_upper = G_TOP_UPPER * (self.T_top - self.T_upper)
+
+        dT_top = (q_solar_top - q_rad_top + q_cond_pan_top - q_cond_top_upper) * dt / C_TOP
         self.T_top += dT_top
 
-        # 3. CHASIS SUPERIOR (Z: +50 a +140 mm)
-        p_upper_sources = sum(s.power for s in self.sources if s.enabled and s.pos[2] > 40)
-        t_upper_k = self.T_upper + 273.15
-        q_rad_upper = 0.70 * SIGMA_SB * 0.02 * (t_upper_k**4)
-        q_cond_up_to_mid = 2.0 * (self.T_mid - self.T_upper)
-        dT_upper = (p_upper_sources - q_rad_upper - q_cond_top_to_upper + q_cond_up_to_mid) * dt / 1075.0
+        # ── 4. CHASIS SUPERIOR (Z: +50…+140 mm) ─────────────────────────────
+        p_upper = sum(s.power for s in self.sources if s.enabled and s.pos[2] > 40)
+        t_upper_k   = self.T_upper + 273.15
+        # Radiación lateral de esta sección (1 de 3 zonas del chasis)
+        q_rad_upper = EPS_CHASSIS * SIGMA_SB * (A_LATERAL / 3.0) * t_upper_k**4
+
+        q_cond_upper_mid = G_UPPER_MID * (self.T_upper - self.T_mid)
+        dT_upper = (p_upper - q_rad_upper + q_cond_top_upper - q_cond_upper_mid) * dt / C_UPPER
         self.T_upper += dT_upper
 
-        # 4. CHASIS MEDIO (Z: -30 a +50 mm)
-        p_mid_sources = sum(s.power for s in self.sources if s.enabled and -30 <= s.pos[2] <= 40)
-        t_mid_k = self.T_mid + 273.15
-        q_rad_mid = 0.70 * SIGMA_SB * 0.02 * (t_mid_k**4)
-        q_cond_mid_to_low = 2.0 * (self.T_lower - self.T_mid)
-        dT_mid = (p_mid_sources - q_rad_mid - q_cond_up_to_mid + q_cond_mid_to_low) * dt / 1344.0
+        # ── 5. CHASIS MEDIO (Z: −30…+50 mm) ─────────────────────────────────
+        p_mid       = sum(s.power for s in self.sources if s.enabled and -30 <= s.pos[2] <= 40)
+        t_mid_k     = self.T_mid + 273.15
+        q_rad_mid   = EPS_CHASSIS * SIGMA_SB * (A_LATERAL / 3.0) * t_mid_k**4
+
+        q_cond_mid_lower = G_MID_LOWER * (self.T_mid - self.T_lower)
+        dT_mid = (p_mid - q_rad_mid + q_cond_upper_mid - q_cond_mid_lower) * dt / C_MID
         self.T_mid += dT_mid
 
-        # 5. CHASIS INFERIOR (Z: -120 a -30 mm)
-        p_low_sources = sum(s.power for s in self.sources if s.enabled and s.pos[2] < -30)
-        
-        # Termostato autónomo Kapton para Batería
-        if self.chk_battery_heater.isChecked() and self.T_lower < 2.0:
-            p_low_sources += 2.0
+        # ── 6. CHASIS INFERIOR (Z: −120…−30 mm) ─────────────────────────────
+        p_low = sum(s.power for s in self.sources if s.enabled and s.pos[2] < -30)
+
+        # Calentador Kapton: control por temperatura del termistor de la batería
+        # (T17 = celda 1, T18 = celda 2 — índices 16 y 17 en la lista)
+        t_bat_sensor = min(self.thermistors[16].temp, self.thermistors[17].temp)
+        heater_on = self.chk_battery_heater.isChecked() and (t_bat_sensor < 2.0)
+        p_heater  = 2.0 if heater_on else 0.0
+        p_low    += p_heater
+
+        if heater_on:
             self.battery_safety_badge.setText("Heater: ACTIVO (2W)")
             self.battery_safety_badge.setStyleSheet("background-color: #d29922; color: #0d1117; font-weight: bold; padding: 2px 8px; border-radius: 3px; font-size: 11px;")
         else:
             self.battery_safety_badge.setText("Batería: OK")
             self.battery_safety_badge.setStyleSheet("background-color: #238636; color: white; font-weight: bold; padding: 2px 8px; border-radius: 3px; font-size: 11px;")
 
-        t_lower_k = self.T_lower + 273.15
-        q_rad_lower = 0.70 * SIGMA_SB * 0.02 * (t_lower_k**4)
-        q_cond_low_to_bot = 1.6 * (self.T_bottom - self.T_lower)
-        dT_lower = (p_low_sources - q_rad_lower - q_cond_mid_to_low + q_cond_low_to_bot) * dt / 1612.0
+        t_lower_k   = self.T_lower + 273.15
+        q_rad_lower = EPS_CHASSIS * SIGMA_SB * (A_LATERAL / 3.0) * t_lower_k**4
+
+        q_cond_lower_bot = G_LOWER_BOT * (self.T_lower - self.T_bottom)
+        dT_lower = (p_low - q_rad_lower + q_cond_mid_lower - q_cond_lower_bot) * dt / C_LOWER
         self.T_lower += dT_lower
 
-        # 6. CARA INFERIOR (-Z Nadir)
-        q_earth_ir_bot = 0.85 * 0.01 * q_earth_ir_flux * 0.70
-        t_bot_k = self.T_bottom + 273.15
-        q_rad_bot = 0.85 * SIGMA_SB * 0.01 * (t_bot_k**4)
-        dT_bottom = (q_earth_ir_bot - q_rad_bot - q_cond_low_to_bot) * dt / 270.0
+        # ── 7. CARA INFERIOR (−Z, nadir) ─────────────────────────────────────
+        # Factor de vista cara nadir→Tierra ≈ 0.85 (prácticamente apunta directo)
+        f_view_bot_earth = 0.85
+        q_earth_ir_bot   = EPS_BOT * Q_EARTH_IR * A_BOT * f_view_bot_earth    # ~1.7 W
+        t_bot_k          = self.T_bottom + 273.15
+        q_rad_bot        = EPS_BOT * SIGMA_SB * A_BOT * t_bot_k**4
+
+        dT_bottom = (q_earth_ir_bot - q_rad_bot + q_cond_lower_bot) * dt / C_BOT
         self.T_bottom += dT_bottom
 
-        # ==================== CÁLCULO DE RADIACIÓN AL VACÍO (STEFAN-BOLTZMANN) ====================
-        # Potencia total irradiada al espacio por todas las superficies
-        self.q_rad_total = float(q_rad_panels + q_rad_top + q_rad_upper + q_rad_mid + q_rad_lower + q_rad_bot)
-        
-        # Potencia total absorbida / generada
-        total_p_internal = sum(s.power for s in self.sources if s.enabled)
-        total_q_in = q_solar_panels + q_solar_top + q_earth_ir_panels + q_earth_ir_bot + total_p_internal
+        # ── 8. BALANCE RADIATIVO AL VACÍO (Stefan-Boltzmann) ─────────────────
+        self.q_rad_total = float(q_rad_panels + q_rad_top + q_rad_upper
+                                 + q_rad_mid + q_rad_lower + q_rad_bot)
+
+        # Potencia interna total (incluye calentador Kapton)
+        total_p_internal = sum(s.power for s in self.sources if s.enabled) + p_heater
+        total_q_in = (q_solar_direct + q_solar_top + q_albedo_panels
+                      + q_earth_ir_panels + q_earth_ir_bot + total_p_internal)
         self.q_net = total_q_in - self.q_rad_total
 
-        # Temperatura equivalente de radiación al vacío (temperatura de cuerpo negro equivalente)
-        t_eq_k = (self.q_rad_total / (EPSILON_AVG * SIGMA_SB * TOTAL_RAD_AREA))**0.25
+        # T_eq: temperatura de cuerpo negro equivalente radiando Q_rad
+        # con las áreas y emisividades documentadas en la tabla de superficies
+        t_eq_k = (self.q_rad_total / (EPSILON_EFF * SIGMA_SB * TOTAL_RAD_AREA))**0.25
         self.t_rad_equiv = float(t_eq_k - 273.15)
 
-        # Actualizar indicadores de radiación
         net_sign = "+" if self.q_net >= 0 else ""
-        self.rad_badge.setText(f"Q_rad: {self.q_rad_total:.1f}W | T_eq(vacío): {self.t_rad_equiv:.1f}°C | Q_net: {net_sign}{self.q_net:.1f}W")
+        self.rad_badge.setText(
+            f"Q_rad: {self.q_rad_total:.1f}W | T_eq(vacío): {self.t_rad_equiv:.1f}°C | Q_net: {net_sign}{self.q_net:.1f}W")
         self.lbl_q_rad_info.setText(f"• Potencia Irradiada al Espacio (Q_rad): <b>{self.q_rad_total:.1f} W</b>")
         self.lbl_t_rad_info.setText(f"• Temperatura Radiativa de Equilibrio: <b>{self.t_rad_equiv:.1f} °C</b>")
         estado_net = "Calentándose" if self.q_net > 0 else "Enfriándose al vacío"
         self.lbl_q_net_info.setText(f"• Flujo Térmico Neto (Q_net): <b>{net_sign}{self.q_net:.1f} W</b> ({estado_net})")
 
-        # 7. LECTURAS PRECISAS DE LOS 20 TERMISTORES (CON ELEVACIÓN TÉRMICA LOCAL REAL)
-        # Resistencia térmica efectiva de montaje de componentes: R_th = 5.5 K/W
-        # Esto genera incrementos locales de 15°C a 25°C cuando un componente consume 3-5W
-        R_TH_LOCAL = 5.5 # K / W
+        # ── 9. LECTURAS DE LOS 20 TERMISTORES ────────────────────────────────────
+        # T_base: interpolación exacta de la red nodal de 6 nodos.
+        # ΔT_local: ESTIMACIÓN de elevación por fuentes próximas usando
+        #   ΔT = P × R_TH_LOCAL × exp(-d / L_COND_MM)
+        # con R_TH_LOCAL = 5.5 K/W y L_COND_MM = 40 mm (constantes del módulo).
+        # ADVERTENCIA: esta expresión no resuelve el campo de conducción. Requiere
+        # calibración experimental (TVAC) para determinar R_th y L_c reales.
         t_readings = []
 
         for i, th in enumerate(self.thermistors):
             pz = th.pos[2]
             pr = np.sqrt(th.pos[0]**2 + th.pos[1]**2)
 
+            # Temperatura base: interpolación lineal exacta de los nodos
             if th.name.startswith("Panel"):
                 xi = np.clip((pr - 50.0) / 295.0, 0.0, 1.0)
                 t_base = self.T_top + xi * (self.T_panels_tip - self.T_top)
@@ -1005,24 +1144,24 @@ class SimulatorApp(QMainWindow):
                 t_base = self.T_top
             elif pz > 50:
                 a_z = (pz - 50.0) / 90.0
-                t_base = (1.0 - a_z) * self.T_mid + a_z * self.T_upper
+                t_base = (1.0 - a_z) * self.T_upper + a_z * self.T_top
             elif pz > -30:
                 a_z = (pz + 30.0) / 80.0
+                t_base = (1.0 - a_z) * self.T_mid + a_z * self.T_upper
+            elif pz > -120:
+                a_z = (pz + 120.0) / 90.0
                 t_base = (1.0 - a_z) * self.T_lower + a_z * self.T_mid
-            elif pz > -140:
-                a_z = (pz + 140.0) / 110.0
+            elif pz > -170:
+                a_z = (pz + 170.0) / 50.0
                 t_base = (1.0 - a_z) * self.T_bottom + a_z * self.T_lower
             else:
                 t_base = self.T_bottom
 
-            # Conducción en el aluminio 6061 por fuentes activas (R_th * P * decay)
-            t_local = 0.0
-            for s in self.sources:
-                if s.enabled and s.power > 0:
-                    d = np.linalg.norm(th.pos - s.pos)
-                    # Elevación térmica local real
-                    t_local += s.power * R_TH_LOCAL * np.exp(-d / 40.0)
-
+            # Elevación local (estimación, no FEM)
+            t_local = sum(
+                s.power * R_TH_LOCAL * np.exp(-np.linalg.norm(th.pos - s.pos) / L_COND_MM)
+                for s in self.sources if s.enabled and s.power > 0
+            )
             t_final = t_base + t_local
             th.temp = float(t_final)
             t_readings.append(t_final)
@@ -1098,36 +1237,54 @@ class SimulatorApp(QMainWindow):
 
     # ==================== RENDERIZADO 3D CON PUNTOS CALIENTES VISIBLES (3 HZ) ====================
     def update_3d_render(self):
-        """ Renderiza el modelo CAD con gradientes continuos y focos térmicos reales """
+        """
+        Renderiza el modelo CAD con el mapa de temperatura de la red nodal.
+
+        El gradiente de color usa la misma interpolación nodal que las lecturas de
+        termistores, garantizando coherencia entre los colores del CAD y los valores
+        de la tabla. Los focos térmicos usan R_TH_LOCAL y L_COND_MM del módulo.
+        """
         if self.is_paused or not hasattr(self, 'meshdata'): return
 
-        # 1. Gradiente a lo largo del chasis (Z: de -170mm a +170mm)
-        T_body_grad = self.T_bottom + self.z_norm * (self.T_top - self.T_bottom)
+        z = self.face_centers[:, 2]
 
-        # 2. Transición matemáticamente suave a lo largo de los paneles solares
-        T_panel_grad = self.T_top + self.panel_xi * (self.T_panels_tip - self.T_top)
+        # Interpolación nodal en 4 zonas — MISMA lógica que los termistores
+        T_faces = np.where(
+            z > 140,   self.T_top,
+            np.where(
+                z > 50,
+                self.T_upper + (z - 50.0) / 90.0 * (self.T_top - self.T_upper),
+                np.where(
+                    z > -30,
+                    self.T_mid + (z + 30.0) / 80.0 * (self.T_upper - self.T_mid),
+                    np.where(
+                        z > -120,
+                        self.T_lower + (z + 120.0) / 90.0 * (self.T_mid - self.T_lower),
+                        self.T_bottom + np.clip((z + 170.0) / 50.0, 0.0, 1.0)
+                                       * (self.T_lower - self.T_bottom)
+                    )
+                )
+            )
+        ).astype(np.float32)
 
-        # 3. Combinar cuerpo y paneles
-        T_faces = np.where(self.is_solar_panel, T_panel_grad, T_body_grad)
+        # Paneles solares: gradiente radial desde la raíz (+Z) a la punta
+        T_panel_grad = (self.T_top + self.panel_xi * (self.T_panels_tip - self.T_top)).astype(np.float32)
+        T_faces = np.where(self.is_solar_panel, T_panel_grad, T_faces)
 
-        # 4. Superponer puntos calientes con elevación térmica visible y realista:
-        # Cada vatio eleva el centro del foco ~5.5°C con un radio de difusión de 35mm
-        # Un SDR o TT&C activo a 4.5W producirá un punto brillante de +25°C perfectamente visible
-        R_TH_CAD = 5.5 # K / W
+        # Focos térmicos superpuestos (mismos parámetros R_TH_LOCAL / L_COND_MM que los termistores)
         for s in self.sources:
             if s.enabled and s.power > 0:
-                dx = self.face_centers[:, 0] - s.pos[0]
-                dy = self.face_centers[:, 1] - s.pos[1]
-                dz = self.face_centers[:, 2] - s.pos[2]
-                dist = np.sqrt(dx**2 + dy**2 + dz**2)
-                # Halo térmico visible y suave en el CAD
-                T_faces += s.power * R_TH_CAD * np.exp(-dist / 35.0)
+                dist = np.sqrt(
+                    (self.face_centers[:, 0] - s.pos[0])**2 +
+                    (self.face_centers[:, 1] - s.pos[1])**2 +
+                    (self.face_centers[:, 2] - s.pos[2])**2
+                )
+                T_faces += s.power * R_TH_LOCAL * np.exp(-dist / L_COND_MM)
 
-        # 5. Mapear a Colormap (-30°C a +70°C)
+        # Mapear a colormap calibrado (−30°C a +70°C)
         idx = np.clip(((T_faces - (-30.0)) / 100.0 * 999.0).astype(np.int32), 0, 999)
         colors = self.cmap[idx]
 
-        # 6. Actualizar buffer en OpenGL
         self.meshdata.setFaceColors(colors)
         self.mesh_item.meshDataChanged()
 
